@@ -1,0 +1,78 @@
+name: CodePush Leaderboard Verifier
+
+on:
+  schedule:
+    - cron: '0 * * * '
+  workflow_dispatch: 
+
+jobs:
+  verify_scores:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install requests
+      run: pip install requests
+        
+    - name: Verify and update leaderboard scores
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      run: |
+        python3 << 'SCRIPT'
+        import os, requests, re
+
+        SUPABASE_URL = os.environ.get('SUPABASE_URL')
+        SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY')
+
+        HEADERS = {
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        # Fetch all registered users from the leaderboard table
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/leaderboard?select=github_username,repo_name",
+            headers=HEADERS
+        )
+        resp.raise_for_status()
+        users = resp.json()
+        print(f"Found {len(users)} users. Calculating scores...")
+
+        for user in users:
+            username = user.get('github_username')
+            repo_name = user.get('repo_name') or 'leetcode_git_linked'
+
+            # Try to fetch Index.md from main branch, then master
+            content = None
+            for branch in ['main', 'master']:
+                url = f"https://raw.githubusercontent.com/{username}/{repo_name}/{branch}/Index.md"
+                r = requests.get(url)
+                if r.status_code == 200:
+                    content = r.text
+                    break
+
+            if not content:
+                print(f"[{username}] No Index.md found in {repo_name}, score = 0")
+                score = 0
+            else:
+                easy = len(re.findall(r'\*Easy\*', content, re.IGNORECASE))
+                medium = len(re.findall(r'\*Medium\*', content, re.IGNORECASE))
+                hard = len(re.findall(r'\*Hard\*', content, re.IGNORECASE))
+                score = (easy * 10) + (medium * 30) + (hard * 50)
+                print(f"[{username}] Score: {score} (Easy: {easy}, Medium: {medium}, Hard: {hard})")
+
+            # Update the score in Supabase
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/leaderboard?github_username=eq.{username}",
+                headers=HEADERS,
+                json={"total_score": score}
+            ).raise_for_status()
+
+        print("Done! All scores updated.")
+        SCRIPT
